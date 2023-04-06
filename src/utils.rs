@@ -38,7 +38,7 @@ where
     }
 }
 
-pub fn expand_trns_line(buf: &mut [u8], trns: &[u8], channels: usize) {
+pub fn expand_trns_line(buf: &mut [u8], trns: Option<&[u8]>, channels: usize) {
     // Return early if empty. This enables to subtract `channels` later without overflow.
     if buf.len() < (channels + 1) {
         return;
@@ -51,10 +51,14 @@ pub fn expand_trns_line(buf: &mut [u8], trns: &[u8], channels: usize) {
     for (i, j) in i.zip(j) {
         let i_pixel = i;
         let j_chunk = j;
-        if &buf[i_pixel..i_pixel + channels] == trns {
-            buf[j_chunk + channels] = 0
+        if let Some(trns) = trns {
+            if &buf[i_pixel..i_pixel + channels] == trns {
+                buf[j_chunk + channels] = 0
+            } else {
+                buf[j_chunk + channels] = 0xFF
+            }
         } else {
-            buf[j_chunk + channels] = 0xFF
+            buf[j_chunk + channels] = 0;
         }
         for k in (0..channels).rev() {
             buf[j_chunk + k] = buf[i_pixel + k];
@@ -62,7 +66,7 @@ pub fn expand_trns_line(buf: &mut [u8], trns: &[u8], channels: usize) {
     }
 }
 
-pub fn expand_trns_line16(buf: &mut [u8], trns: &[u8], channels: usize) {
+pub fn expand_trns_line16(buf: &mut [u8], trns: Option<&[u8]>, channels: usize) {
     let c2 = 2 * channels;
     // Return early if empty. This enables to subtract `channels` later without overflow.
     if buf.len() < (c2 + 2) {
@@ -74,12 +78,17 @@ pub fn expand_trns_line16(buf: &mut [u8], trns: &[u8], channels: usize) {
     for (i, j) in i.zip(j) {
         let i_pixel = i;
         let j_chunk = j;
-        if &buf[i_pixel..i_pixel + c2] == trns {
+        if let Some(trns) = trns {
+            if &buf[i_pixel..i_pixel + c2] == trns {
+                buf[j_chunk + c2] = 0;
+                buf[j_chunk + c2 + 1] = 0
+            } else {
+                buf[j_chunk + c2] = 0xFF;
+                buf[j_chunk + c2 + 1] = 0xFF
+            }
+        } else {
             buf[j_chunk + c2] = 0;
             buf[j_chunk + c2 + 1] = 0
-        } else {
-            buf[j_chunk + c2] = 0xFF;
-            buf[j_chunk + c2 + 1] = 0xFF
         }
         for k in (0..c2).rev() {
             buf[j_chunk + k] = buf[i_pixel + k];

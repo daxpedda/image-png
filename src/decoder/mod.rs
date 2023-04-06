@@ -589,7 +589,11 @@ impl<R: Read> Reader<R> {
 
         let (color_type, bit_depth, trns) = {
             let info = self.info();
-            (info.color_type, info.bit_depth as u8, info.trns.is_some())
+            (
+                info.color_type,
+                info.bit_depth as u8,
+                info.trns.is_some() || transform.contains(Transformations::ALPHA),
+            )
         };
         let output_buffer = if let InterlaceInfo::Adam7 { width, .. } = interlace {
             let width = self
@@ -601,15 +605,17 @@ impl<R: Read> Reader<R> {
         };
 
         let mut len = output_buffer.len();
-        if transform.contains(Transformations::EXPAND) {
-            match color_type {
-                Indexed => expand_paletted(output_buffer, self.decoder.info().unwrap())?,
-                Grayscale | GrayscaleAlpha if bit_depth < 8 => {
-                    expand_gray_u8(output_buffer, self.decoder.info().unwrap())
+        if transform.contains(Transformations::EXPAND) || transform.contains(Transformations::ALPHA)
+        {
+            let info = self.decoder.info().unwrap();
+            let trns = trns.then_some(info.trns.as_deref());
+            match (color_type, trns) {
+                (Indexed, _) => expand_paletted(output_buffer, info, trns)?,
+                (Grayscale | GrayscaleAlpha, _) if bit_depth < 8 => {
+                    expand_gray_u8(output_buffer, info, trns)
                 }
-                Grayscale | Rgb if trns => {
+                (Grayscale | Rgb, Some(trns)) => {
                     let channels = color_type.samples();
-                    let trns = self.decoder.info().unwrap().trns.as_ref().unwrap();
                     if bit_depth == 8 {
                         utils::expand_trns_line(output_buffer, trns, channels);
                     } else {
@@ -647,18 +653,19 @@ impl<R: Read> Reader<R> {
                 n if n < 8 && t.contains(Transformations::EXPAND) => 8,
                 n => n,
             };
-            let color_type = if t.contains(Transformations::EXPAND) {
-                let has_trns = info.trns.is_some();
-                match info.color_type {
-                    Grayscale if has_trns => GrayscaleAlpha,
-                    Rgb if has_trns => Rgba,
-                    Indexed if has_trns => Rgba,
-                    Indexed => Rgb,
-                    ct => ct,
-                }
-            } else {
-                info.color_type
-            };
+            let color_type =
+                if t.contains(Transformations::EXPAND) || t.contains(Transformations::ALPHA) {
+                    let has_trns = info.trns.is_some() || t.contains(Transformations::ALPHA);
+                    match info.color_type {
+                        Grayscale if has_trns => GrayscaleAlpha,
+                        Rgb if has_trns => Rgba,
+                        Indexed if has_trns => Rgba,
+                        Indexed => Rgb,
+                        ct => ct,
+                    }
+                } else {
+                    info.color_type
+                };
             (color_type, BitDepth::from_u8(bits).unwrap())
         }
     }
@@ -682,7 +689,8 @@ impl<R: Read> Reader<R> {
         use crate::common::ColorType::*;
         let t = self.transform;
         let info = self.info();
-        let trns = info.trns.is_some();
+        let expand = t.contains(Transformations::EXPAND) || t.contains(Transformations::ALPHA);
+        let trns = info.trns.is_some() || t.contains(Transformations::ALPHA);
 
         let expanded = if info.bit_depth == BitDepth::Sixteen {
             BitDepth::Sixteen
@@ -692,12 +700,12 @@ impl<R: Read> Reader<R> {
         // The color type and depth representing the decoded line
         // TODO 16 bit
         let (color, depth) = match info.color_type {
-            Indexed if trns && t.contains(Transformations::EXPAND) => (Rgba, expanded),
-            Indexed if t.contains(Transformations::EXPAND) => (Rgb, expanded),
-            Rgb if trns && t.contains(Transformations::EXPAND) => (Rgba, expanded),
-            Grayscale if trns && t.contains(Transformations::EXPAND) => (GrayscaleAlpha, expanded),
-            Grayscale if t.contains(Transformations::EXPAND) => (Grayscale, expanded),
-            GrayscaleAlpha if t.contains(Transformations::EXPAND) => (GrayscaleAlpha, expanded),
+            Indexed if expand && trns => (Rgba, expanded),
+            Indexed if expand => (Rgb, expanded),
+            Rgb if expand && trns => (Rgba, expanded),
+            Grayscale if expand && trns => (GrayscaleAlpha, expanded),
+            Grayscale if expand => (Grayscale, expanded),
+            GrayscaleAlpha if expand => (GrayscaleAlpha, expanded),
             other => (other, info.bit_depth),
         };
 
@@ -813,7 +821,11 @@ impl SubframeInfo {
     }
 }
 
-fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), DecodingError> {
+fn expand_paletted(
+    buffer: &mut [u8],
+    info: &Info,
+    trns: Option<Option<&[u8]>>,
+) -> Result<(), DecodingError> {
     if let Some(palette) = info.palette.as_ref() {
         if let BitDepth::Sixteen = info.bit_depth {
             // This should have been caught earlier but let's check again. Can't hurt.
@@ -826,7 +838,8 @@ fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), DecodingError> 
             ))
         } else {
             let black = [0, 0, 0];
-            if let Some(ref trns) = info.trns {
+            if let Some(trns) = trns {
+                let trns = trns.unwrap_or(&[]);
                 // > The tRNS chunk shall not contain more alpha values than there are palette
                 // entries, but a tRNS chunk may contain fewer values than there are palette
                 // entries. In this case, the alpha value for all remaining palette entries is
@@ -835,7 +848,7 @@ fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), DecodingError> 
                 // It seems, accepted reading is to fully *ignore* an invalid tRNS as if it were
                 // completely empty / all pixels are non-transparent.
                 let trns = if trns.len() <= palette.len() / 3 {
-                    trns.as_ref()
+                    trns
                 } else {
                     &[]
                 };
@@ -871,19 +884,18 @@ fn expand_paletted(buffer: &mut [u8], info: &Info) -> Result<(), DecodingError> 
     }
 }
 
-fn expand_gray_u8(buffer: &mut [u8], info: &Info) {
+fn expand_gray_u8(buffer: &mut [u8], info: &Info, trns: Option<Option<&[u8]>>) {
     let rescale = true;
     let scaling_factor = if rescale {
         (255) / ((1u16 << info.bit_depth as u8) - 1) as u8
     } else {
         1
     };
-    if let Some(ref trns) = info.trns {
+    if let Some(trns) = trns {
         utils::unpack_bits(buffer, 2, info.bit_depth as u8, |pixel, chunk| {
-            if pixel == trns[0] {
-                chunk[1] = 0
-            } else {
-                chunk[1] = 0xFF
+            match trns {
+                Some(trns) if pixel == trns[0] => chunk[1] = 0,
+                _ => chunk[1] = 0xFF,
             }
             chunk[0] = pixel * scaling_factor
         })

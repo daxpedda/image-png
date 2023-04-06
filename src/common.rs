@@ -734,6 +734,8 @@ bitflags! {
         /// less than 8-bit depth to 8-bit depth; and expand tRNS chunks
         /// to alpha channels.
         const EXPAND              = 0x0010; // read only */
+        /// Expand paletted images to include an alpha channel. Implied `EXPAND`.
+        const ALPHA              = 0x10000; // read only */
     }
 }
 
